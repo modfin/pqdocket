@@ -1,0 +1,16 @@
+name: build-and-test
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  workflow_dispatch: {}
+jobs:
+  build-and-run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build-and-run
+        run: ./tests/run.sh
