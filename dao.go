@@ -54,6 +54,47 @@ func (d *docket) initTables() error {
 // InsertTasks - supports max 65535/5 = 13,107 tasks in one batch, since postgres supports max 65535 arguments per statement
 // if you need more, execute multiple InsertTasks in the same transaction
 func (d *docket) InsertTasks(tx *sql.Tx, tcs ...TaskCreator) ([]Task, error) {
+	return d.insertTasks(tx, false, tcs...)
+}
+
+func (d *docket) InsertTask(tx *sql.Tx, tc TaskCreator) (Task, error) {
+	tasks, err := d.InsertTasks(tx, tc)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 1 {
+		return tasks[0], nil
+	}
+	return nil, errors.New("shouldn't happen, got wrong number of tasks from InsertTasks, this is a bug")
+}
+
+// InsertTasksSkipDuplicates - supports max 65535/5 = 13,107 tasks in one batch, since postgres supports max 65535 arguments per statement
+// if you need more, execute multiple InsertTasks in the same transaction
+// requires ref_id to be set on all tasks
+func (d *docket) InsertTasksSkipDuplicates(tx *sql.Tx, tcs ...TaskCreator) ([]Task, error) {
+	for _, tc := range tcs {
+		if !tc.task.refId.Valid {
+			return nil, errors.New("InsertTasksSkipDuplicates requires ref_id to be set on all tasks")
+		}
+	}
+	return d.insertTasks(tx, true, tcs...)
+}
+
+func (d *docket) InsertTaskSkipDuplicates(tx *sql.Tx, tc TaskCreator) (Task, error) {
+	tasks, err := d.InsertTasksSkipDuplicates(tx, tc)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 1 {
+		return tasks[0], nil
+	}
+	// allowed to skip insert if duplicate, so return nil
+	return nil, nil
+}
+
+// InsertTasks - supports max 65535/5 = 13,107 tasks in one batch, since postgres supports max 65535 arguments per statement
+// if you need more, execute multiple InsertTasks in the same transaction
+func (d *docket) insertTasks(tx *sql.Tx, skipDuplicates bool, tcs ...TaskCreator) ([]Task, error) {
 	shouldNotify := false
 	var placeholders []string
 	var args []interface{}
@@ -75,10 +116,15 @@ func (d *docket) InsertTasks(tx *sql.Tx, tcs ...TaskCreator) ([]Task, error) {
 	q := `
 		INSERT INTO pqdocket_task(scheduled_at, ref_id, func, metadata, claim_time_seconds)
 		VALUES %s
+		--DUPLICATES_HANDLING--
 		RETURNING *
 	`
 	q = fmt.Sprintf(q, strings.Join(placeholders, ", "))
 	q = strings.Replace(q, taskTableName, d.tableName(), 1)
+
+	if skipDuplicates {
+		q = strings.Replace(q, "--DUPLICATES_HANDLING--", "ON CONFLICT (ref_id, func) DO NOTHING", 1)
+	}
 
 	var rows *sql.Rows
 	var err error
@@ -108,17 +154,6 @@ func (d *docket) InsertTasks(tx *sql.Tx, tcs ...TaskCreator) ([]Task, error) {
 		d.notifyTaskScheduledTx(tx)
 	}
 	return tasks, rows.Close()
-}
-
-func (d *docket) InsertTask(tx *sql.Tx, tc TaskCreator) (Task, error) {
-	tasks, err := d.InsertTasks(tx, tc)
-	if err != nil {
-		return nil, err
-	}
-	if len(tasks) == 1 {
-		return tasks[0], nil
-	}
-	return nil, errors.New("shouldn't happen, got wrong number of tasks from InsertTasks, this is a bug")
 }
 
 func (d *docket) claimTasks(wantNum int) ([]task, error) {
