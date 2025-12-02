@@ -43,6 +43,12 @@ type Docket interface {
 	// If you need more, execute multiple InsertTasks in the same transaction.
 	InsertTasks(tx *sql.Tx, tc ...TaskCreator) ([]Task, error)
 
+	// InsertTaskSkipDuplicates - insert a task. Tasks are immediately available to run after being inserted. If a task with the same (func, ref_id) exists, the insert is skipped and no error is returned. Cannot be used without ref id.
+	InsertTaskSkipDuplicates(tx *sql.Tx, tc TaskCreator) (Task, error)
+
+	// InsertTasksSkipDuplicates - batch insert tasks, skipping tasks with duplicate (func, ref_id) Cannot be used without ref id.
+	InsertTasksSkipDuplicates(tx *sql.Tx, tc ...TaskCreator) ([]Task, error)
+
 	// FindTasks is used to query tasks.
 	// If executed within a transaction (tx != nil), it will lock the returned rows for the duration of the transaction.
 	FindTasks(tx *sql.Tx, params ...FindParam) ([]Task, error)
