@@ -92,8 +92,6 @@ func (d *docket) InsertTaskSkipDuplicates(tx *sql.Tx, tc TaskCreator) (Task, err
 	return nil, nil
 }
 
-// InsertTasks - supports max 65535/5 = 13,107 tasks in one batch, since postgres supports max 65535 arguments per statement
-// if you need more, execute multiple InsertTasks in the same transaction
 func (d *docket) insertTasks(tx *sql.Tx, skipDuplicates bool, tcs ...TaskCreator) ([]Task, error) {
 	shouldNotify := false
 	var placeholders []string
