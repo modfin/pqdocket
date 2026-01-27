@@ -2,11 +2,12 @@ package pqdocket
 
 import (
 	"errors"
-	"github.com/lib/pq"
 	"log/slog"
 	"math"
 	"math/rand"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 func (d *docket) reinitTablesIfError(l *slog.Logger, err error) {
@@ -32,11 +33,23 @@ func (d *docket) startScheduler() {
 	defer pollTicker.Stop()
 	d.logger.Load().With("poll_interval", pollInterval, "parallelism", d.parallelism).Info("scheduler started")
 
+	// Build exclude list from function parallelism config
+	d.mu.RLock()
+	var excludeFunctions []string
+	for funcName := range d.functionParallelism {
+		excludeFunctions = append(excludeFunctions, funcName)
+	}
+	d.mu.RUnlock()
+	cf := claimFilter{
+		excludeFunctions: excludeFunctions,
+	}
+
 	wantNum := d.parallelism
 	for {
 		l := d.logger.Load()
 		if wantNum > 0 {
-			tasks, err := d.claimTasks(wantNum)
+			// Use filtered claiming to exclude functions with specific parallelism
+			tasks, err := d.claimTasksWithFilter(wantNum, cf)
 			if err != nil {
 				l.With("error", err).Error("error in claimTasks")
 				d.reinitTablesIfError(l, err)
@@ -50,7 +63,7 @@ func (d *docket) startScheduler() {
 			}
 		}
 
-		timeout := d.timeToSleep()
+		timeout := d.timeToSleep(cf)
 
 		// protect against polling if our workers are full
 		if wantNum == 0 && timeout < 2*time.Second {
@@ -111,4 +124,91 @@ func (d *docket) startScheduler() {
 		time.Sleep(1 * time.Second)
 	}
 	close(d.closeFinished)
+}
+
+func (d *docket) startFunctionScheduler(fs *functionScheduler) {
+	taskScheduled := d.listener.NotificationChannel()
+
+	maxDrift := int64(d.pollInterval / time.Duration(10))
+	randomDrift := time.Duration(rand.Int63n(maxDrift) - maxDrift/2)
+	pollInterval := d.pollInterval + randomDrift
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+	d.logger.Load().With(
+		"poll_interval", pollInterval,
+		"parallelism", fs.parallelism,
+		"function", fs.funcName,
+	).Info("function scheduler started")
+
+	cf := claimFilter{
+		onlyFunctions: []string{fs.funcName},
+	}
+
+	fs.wantNum = fs.parallelism
+	for {
+		l := d.logger.Load()
+		if fs.wantNum > 0 {
+			tasks, err := d.claimTasksWithFilter(fs.wantNum, cf)
+			if err != nil {
+				l.With("error", err, "function", fs.funcName).Error("error in claimTasksWithFilter")
+				d.reinitTablesIfError(l, err)
+				time.Sleep(20 * time.Second)
+				continue
+			}
+			l.With("want", fs.wantNum, "got", len(tasks), "function", fs.funcName).Info("claimTasks")
+			for _, t := range tasks {
+				fs.claimedTasks <- t
+				fs.wantNum--
+			}
+		}
+
+		timeout := d.timeToSleep(cf)
+
+		if fs.wantNum == 0 && timeout < 2*time.Second {
+			timeout = 2 * time.Second
+		}
+		if timeout < time.Duration(math.MaxInt64) {
+			l.With("timeout", timeout.Round(time.Millisecond).String(), "function", fs.funcName).Info("setting timeout")
+		}
+
+		timer := time.NewTimer(timeout)
+		select {
+		case <-taskScheduled:
+			l = l.With("reason", "task_scheduled", "function", fs.funcName)
+		case <-fs.taskCompleted:
+			fs.wantNum++
+			l = l.With("reason", "task_completed", "function", fs.funcName)
+		case <-fs.close:
+			l = l.With("reason", "closed", "function", fs.funcName)
+		case <-timer.C:
+			l = l.With("reason", "timeout", "function", fs.funcName)
+		case <-pollTicker.C:
+			l = l.With("reason", "poll", "function", fs.funcName)
+		}
+		l.Info("wakeup")
+		timer.Stop()
+
+		d.mu.RLock()
+		closed := d.closed
+		d.mu.RUnlock()
+		if closed {
+			break
+		}
+
+		// consume extra buffered taskScheduled/taskCompleted messages
+		for {
+			select {
+			case <-fs.taskCompleted:
+				fs.wantNum++
+				continue
+			case <-taskScheduled:
+				continue
+			default:
+			}
+			break
+		}
+	}
+
+	d.logger.Load().With("function", fs.funcName).Info("close: function scheduler terminated")
+	close(fs.closeFinished)
 }

@@ -67,6 +67,7 @@ func TestMain(m *testing.M) {
 	FindInit()
 	ChainInit()
 	ExtendedClaimInit()
+	PerFunctionParallelismInit()
 
 	db, err = sql.Open("postgres", dbUrl)
 	if err != nil {
@@ -80,6 +81,7 @@ func TestMain(m *testing.M) {
 	d.Close()
 	d.Close() // intentional
 	d2.Close()
+	pfpD.Close()
 	err = db.Close()
 	if err != nil {
 		fmt.Println("db close err", err)

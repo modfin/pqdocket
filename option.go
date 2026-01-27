@@ -96,3 +96,18 @@ func UseManuallyCreatedTable(tableName string) Option {
 		docket.useManuallyCreatedTable = tableName
 	}
 }
+
+// FunctionParallelism specifies the max number of tasks for a specific function or functions
+// that can run in parallel. Functions with specific parallelism are excluded
+// from the general scheduler pool.
+func FunctionParallelism(funcName string, parallelism int) Option {
+	return func(docket *docket) {
+		if parallelism <= 0 {
+			panic("parallelism must be positive")
+		}
+		if docket.functionParallelism == nil {
+			docket.functionParallelism = make(map[string]int)
+		}
+		docket.functionParallelism[funcName] = parallelism
+	}
+}

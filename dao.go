@@ -154,7 +154,12 @@ func (d *docket) insertTasks(tx *sql.Tx, skipDuplicates bool, tcs ...TaskCreator
 	return tasks, rows.Close()
 }
 
-func (d *docket) claimTasks(wantNum int) ([]task, error) {
+type claimFilter struct {
+	onlyFunctions    []string // If non-empty, claim ONLY these functions
+	excludeFunctions []string // If non-empty, exclude these functions
+}
+
+func (d *docket) claimTasksWithFilter(wantNum int, filter claimFilter) ([]task, error) {
 	q := `
 	WITH tasks_to_claim AS (
 		SELECT task_id
@@ -163,6 +168,7 @@ func (d *docket) claimTasks(wantNum int) ([]task, error) {
 		  AND (scheduled_at < now())
 		  AND (claimed_until IS NULL OR now() > claimed_until)
           AND claim_count < $1
+		  --FUNCTION_FILTER--
 		ORDER BY scheduled_at ASC
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED
@@ -173,8 +179,36 @@ func (d *docket) claimTasks(wantNum int) ([]task, error) {
 	WHERE task_id IN (select * from tasks_to_claim)
 	RETURNING *
 	`
+
+	var args []interface{}
+	args = append(args, d.maxClaimCount, wantNum)
+	argNum := 3
+
+	// Build dynamic SQL filter
+	if len(filter.onlyFunctions) > 0 {
+		placeholders := make([]string, len(filter.onlyFunctions))
+		for i, fn := range filter.onlyFunctions {
+			placeholders[i] = fmt.Sprintf("$%d", argNum)
+			args = append(args, fn)
+			argNum++
+		}
+		funcFilter := fmt.Sprintf("AND func IN (%s)", strings.Join(placeholders, ", "))
+		q = strings.Replace(q, "--FUNCTION_FILTER--", funcFilter, 1)
+	} else if len(filter.excludeFunctions) > 0 {
+		placeholders := make([]string, len(filter.excludeFunctions))
+		for i, fn := range filter.excludeFunctions {
+			placeholders[i] = fmt.Sprintf("$%d", argNum)
+			args = append(args, fn)
+			argNum++
+		}
+		funcFilter := fmt.Sprintf("AND func NOT IN (%s)", strings.Join(placeholders, ", "))
+		q = strings.Replace(q, "--FUNCTION_FILTER--", funcFilter, 1)
+	} else {
+		q = strings.Replace(q, "--FUNCTION_FILTER--", "", 1)
+	}
+
 	q = strings.Replace(q, taskTableName, d.tableName(), 2)
-	rows, err := d.db.Query(q, d.maxClaimCount, wantNum)
+	rows, err := d.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +228,10 @@ func (d *docket) claimTasks(wantNum int) ([]task, error) {
 		return nil, err
 	}
 	return claimedTasks, rows.Close()
+}
+
+func (d *docket) claimTasks(wantNum int) ([]task, error) {
+	return d.claimTasksWithFilter(wantNum, claimFilter{})
 }
 
 func (d *docket) saveTaskResult(l *slog.Logger, t task, taskErr error) {
@@ -354,17 +392,62 @@ func (t task) ExtendClaim(duration time.Duration) (*time.Time, error) {
 	return &claimedUntil, nil
 }
 
-func (d *docket) timeToSleep() time.Duration {
+func (d *docket) timeToSleep(filter claimFilter) time.Duration {
 	var seconds float64
 	q := `
 	SELECT EXTRACT(EPOCH FROM s.ready_at - now()) FROM (
 	    SELECT greatest(scheduled_at, claimed_until) as ready_at FROM pqdocket_task t1
 		WHERE completed_at IS NULL AND claim_count < $1
+		  --FUNCTION_FILTER--
 		ORDER BY ready_at
 		LIMIT 1
 	) s
 	`
 	q = strings.Replace(q, taskTableName, d.tableName(), 1)
+	// Build dynamic SQL filter
+	if len(filter.onlyFunctions) > 0 {
+		placeholders := make([]string, len(filter.onlyFunctions))
+		var args []interface{}
+		args = append(args, d.maxClaimCount)
+		argNum := 2
+		for i, fn := range filter.onlyFunctions {
+			placeholders[i] = fmt.Sprintf("$%d", argNum)
+			args = append(args, fn)
+			argNum++
+		}
+		funcFilter := fmt.Sprintf("AND func IN (%s)", strings.Join(placeholders, ", "))
+		q = strings.Replace(q, "--FUNCTION_FILTER--", funcFilter, 1)
+		err := d.db.QueryRow(q, args...).Scan(&seconds)
+		if err != nil && errors.Is(err, sql.ErrNoRows) {
+			return time.Duration(math.MaxInt64)
+		}
+		if err != nil {
+			d.logger.Load().With("error", err).Warn("error getting time to sleep")
+			return time.Duration(math.MaxInt64)
+		}
+	} else if len(filter.excludeFunctions) > 0 {
+		placeholders := make([]string, len(filter.excludeFunctions))
+		var args []interface{}
+		args = append(args, d.maxClaimCount)
+		argNum := 2
+		for i, fn := range filter.excludeFunctions {
+			placeholders[i] = fmt.Sprintf("$%d", argNum)
+			args = append(args, fn)
+			argNum++
+		}
+		funcFilter := fmt.Sprintf("AND func NOT IN (%s)", strings.Join(placeholders, ", "))
+		q = strings.Replace(q, "--FUNCTION_FILTER--", funcFilter, 1)
+		err := d.db.QueryRow(q, args...).Scan(&seconds)
+		if err != nil && errors.Is(err, sql.ErrNoRows) {
+			return time.Duration(math.MaxInt64)
+		}
+		if err != nil {
+			d.logger.Load().With("error", err).Warn("error getting time to sleep")
+			return time.Duration(math.MaxInt64)
+		}
+	} else {
+		q = strings.Replace(q, "--FUNCTION_FILTER--", "", 1)
+	}
 	err := d.db.QueryRow(q, d.maxClaimCount).Scan(&seconds)
 	if err != nil && errors.Is(err, sql.ErrNoRows) {
 		return time.Duration(math.MaxInt64)

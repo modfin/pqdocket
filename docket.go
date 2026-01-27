@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/lib/pq"
 	"io"
 	"log/slog"
 	"math"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type Docket interface {
@@ -82,11 +83,25 @@ type docket struct {
 	taskCompleted chan bool
 	functions     map[string]TaskFunction
 
+	// Per-function parallelism configuration
+	functionParallelism map[string]int
+	functionSchedulers  map[string]*functionScheduler
+
 	closed               bool
 	close                chan bool
 	closeFinished        chan bool
 	cleanerCloseFinished chan bool
 	runningWorkers       int
+}
+
+type functionScheduler struct {
+	funcName      string
+	parallelism   int
+	wantNum       int
+	claimedTasks  chan task
+	taskCompleted chan bool
+	close         chan bool
+	closeFinished chan bool
 }
 
 type TaskFunction func(task RunningTask) error
@@ -134,13 +149,24 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(d.parallelism + 1)
+
+	// Calculate total parallelism for workers and connections
+	totalParallelism := d.parallelism
+	for _, fp := range d.functionParallelism {
+		totalParallelism += fp
+	}
+
+	// Size connection pool: workers + schedulers (1 general + N function-specific) + 1 for misc
+	schedulerCount := 1 + len(d.functionParallelism)
+	db.SetMaxOpenConns(totalParallelism + schedulerCount + 1)
 	db.SetConnMaxLifetime(d.pollInterval * 2)
 	d.db = db
 
 	d.claimedTasks = make(chan task, d.parallelism)
 	d.taskCompleted = make(chan bool, d.parallelism*2)
 	d.functions = make(map[string]TaskFunction)
+	d.functionParallelism = make(map[string]int)
+	d.functionSchedulers = make(map[string]*functionScheduler)
 	if err = d.initTables(); err != nil {
 		return nil, err
 	}
@@ -148,11 +174,34 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	if err = d.listener.Listen(d.channelName()); err != nil {
 		return nil, err
 	}
+
+	// Start general scheduler
 	go d.startScheduler()
+
 	for i := 0; i < d.parallelism; i++ {
-		go d.worker(i)
+		go d.worker(d.runningWorkers, d.claimedTasks, d.taskCompleted)
 		d.runningWorkers++
 	}
+
+	// Start function-specific schedulers
+	for fn, parallelism := range d.functionParallelism {
+		fs := &functionScheduler{
+			funcName:      fn,
+			parallelism:   parallelism,
+			taskCompleted: make(chan bool, parallelism*2),
+			claimedTasks:  make(chan task, parallelism),
+			close:         make(chan bool),
+			closeFinished: make(chan bool),
+		}
+		d.functionSchedulers[fn] = fs
+		go d.startFunctionScheduler(fs)
+
+		for i := 0; i < parallelism; i++ {
+			go d.worker(d.runningWorkers, fs.claimedTasks, fs.taskCompleted)
+			d.runningWorkers++
+		}
+	}
+
 	if d.taskCleaner != nil {
 		if d.taskCleaner.PollInterval == 0 {
 			d.taskCleaner.PollInterval = 10 * time.Minute
@@ -241,9 +290,22 @@ func (d *docket) Close() {
 	if !alreadyClosed {
 		d.closed = true
 		close(d.close)
+
+		// Close function schedulers
+		for _, fs := range d.functionSchedulers {
+			close(fs.close)
+		}
 	}
 	d.mu.Unlock()
+
+	// Wait for general scheduler
 	<-d.closeFinished
+
+	// Wait for function schedulers
+	for funcName, fs := range d.functionSchedulers {
+		d.logger.Load().With("function", funcName).Info("close: waiting for function scheduler...")
+		<-fs.closeFinished
+	}
 	if d.cleanerCloseFinished != nil {
 		<-d.cleanerCloseFinished
 	}

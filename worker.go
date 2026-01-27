@@ -5,13 +5,13 @@ import (
 	"fmt"
 )
 
-func (d *docket) worker(workerId int) {
-	for t := range d.claimedTasks {
+func (d *docket) worker(workerId int, taskChan chan task, taskCompleted chan bool) {
+	for t := range taskChan {
 		l := t.logger()
 		l.With("worker_id", workerId).Info("running task")
 		err := d.workerBody(t)
 		d.saveTaskResult(l, t, err)
-		d.taskCompleted <- true
+		taskCompleted <- true
 	}
 	d.logger.Load().With("worker_id", workerId).Info("worker terminated")
 	d.mu.Lock()
