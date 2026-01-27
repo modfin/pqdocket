@@ -4,12 +4,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/guregu/null/v6"
-	"github.com/lib/pq"
 	"log/slog"
 	"math"
 	"strings"
 	"time"
+
+	"github.com/guregu/null/v6"
+	"github.com/lib/pq"
+	"github.com/modfin/pqdocket/want"
 )
 
 const taskTableName = "pqdocket_task"
@@ -37,6 +39,10 @@ func (d *docket) initTables() error {
 	CREATE INDEX CONCURRENTLY IF NOT EXISTS pqdocket_task_scheduled_at_idx
 	ON pqdocket_task (scheduled_at ASC) WHERE completed_at IS NULL
 	`
+	q3 := `
+	CREATE INDEX CONCURRENTLY IF NOT EXISTS pqdocket_task_ready_at_idx
+    ON pqdocket_task (greatest(scheduled_at, claimed_until)) WHERE completed_at IS NULL;
+	`
 	_, err := d.db.Exec(strings.Replace(q, taskTableName, d.tableName(), 1))
 	if err != nil {
 		return err
@@ -45,6 +51,21 @@ func (d *docket) initTables() error {
 	if err != nil {
 		return err
 	}
+	_, err = d.db.Exec(strings.Replace(q3, taskTableName, d.tableName(), 2))
+	if err != nil {
+		return err
+	}
+	if len(d.parallelismMinByFunc) > 0 {
+		q4 := `
+		CREATE INDEX CONCURRENTLY IF NOT EXISTS pqdocket_task_func_scheduled_at_idx
+		ON pqdocket_task (func, scheduled_at ASC) WHERE completed_at IS NULL
+		`
+		_, err = d.db.Exec(strings.Replace(q4, taskTableName, d.tableName(), 2))
+		if err != nil {
+			return err
+		}
+	}
+
 	if d.afterTableInitCallback == nil {
 		return nil
 	}
@@ -154,46 +175,96 @@ func (d *docket) insertTasks(tx *sql.Tx, skipDuplicates bool, tcs ...TaskCreator
 	return tasks, rows.Close()
 }
 
-func (d *docket) claimTasks(wantNum int) ([]task, error) {
-	q := `
-	WITH tasks_to_claim AS (
-		SELECT task_id
-		FROM pqdocket_task t1
-		WHERE completed_at IS NULL
-		  AND (scheduled_at < now())
-		  AND (claimed_until IS NULL OR now() > claimed_until)
-          AND claim_count < $1
-		ORDER BY scheduled_at ASC
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED
-	)
-	UPDATE pqdocket_task
-	SET claimed_until = now() + make_interval(secs := claim_time_seconds),
-		claim_count = claim_count + 1
-	WHERE task_id IN (select * from tasks_to_claim)
-	RETURNING *
-	`
-	q = strings.Replace(q, taskTableName, d.tableName(), 2)
-	rows, err := d.db.Query(q, d.maxClaimCount, wantNum)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var claimedTasks []task
-	for rows.Next() {
-		t, err := scanTaskFrom(rows)
+func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
+
+	claim := func(q string, args ...any) ([]task, error) {
+		q = strings.Replace(q, taskTableName, d.tableName(), 2)
+		rows, err := d.db.Query(q, args...)
 		if err != nil {
 			return nil, err
 		}
-		t.docket = d
-		t.claimedByThisProcess = true
-		claimedTasks = append(claimedTasks, t)
+		defer rows.Close()
+		var claimedTasks []task
+		for rows.Next() {
+			t, err := scanTaskFrom(rows)
+			if err != nil {
+				return nil, err
+			}
+			t.docket = d
+			t.claimedByThisProcess = true
+			claimedTasks = append(claimedTasks, t)
+		}
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+		return claimedTasks, rows.Close()
 	}
-	err = rows.Err()
-	if err != nil {
-		return nil, err
+
+	var claimedTasks []task
+
+	wantByFunc := wantNum.WantByFuncNameTotal()
+
+	if wantByFunc > 0 {
+		q := `
+		WITH tasks_to_claim AS (
+			SELECT task_id
+			FROM unnest($2 :: TEXT[], $3 :: INT[]) f(func_name, func_limit)
+			JOIN LATERAL (
+				SELECT task_id
+				FROM pqdocket_task
+				WHERE completed_at IS NULL
+				  AND func = f.func_name
+				  AND (scheduled_at < now())
+				  AND (claimed_until IS NULL OR now() > claimed_until)
+				  AND claim_count < $1
+				ORDER BY scheduled_at ASC
+				LIMIT f.func_limit
+			) a ON true
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE pqdocket_task
+		SET claimed_until = now() + make_interval(secs := claim_time_seconds),
+			claim_count = claim_count + 1
+		WHERE task_id IN (select * from tasks_to_claim)
+		RETURNING *
+		`
+		funcNames, funcLimits := wantNum.WantByFuncName()
+		tasks, err := claim(q, d.maxClaimCount, pq.StringArray(funcNames), pq.Int64Array(funcLimits))
+		if err != nil {
+			return nil, err
+		}
+		claimedTasks = append(claimedTasks, tasks...)
 	}
-	return claimedTasks, rows.Close()
+
+	wantGeneral := wantNum.General() + wantByFunc - len(claimedTasks)
+
+	if wantGeneral > 0 {
+		q := `
+		WITH tasks_to_claim AS (
+			SELECT task_id
+			FROM pqdocket_task t1
+			WHERE completed_at IS NULL
+			  AND (scheduled_at < now())
+			  AND (claimed_until IS NULL OR now() > claimed_until)
+			  AND claim_count < $1
+			ORDER BY scheduled_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE pqdocket_task
+		SET claimed_until = now() + make_interval(secs := claim_time_seconds),
+			claim_count = claim_count + 1
+		WHERE task_id IN (select * from tasks_to_claim)
+		RETURNING *
+		`
+		tasks, err := claim(q, d.maxClaimCount, wantGeneral)
+		if err != nil {
+			return nil, err
+		}
+		claimedTasks = append(claimedTasks, tasks...)
+	}
+	return claimedTasks, nil
 }
 
 func (d *docket) saveTaskResult(l *slog.Logger, t task, taskErr error) {

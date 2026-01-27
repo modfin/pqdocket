@@ -2,11 +2,13 @@ package pqdocket
 
 import (
 	"errors"
-	"github.com/lib/pq"
 	"log/slog"
 	"math"
 	"math/rand"
 	"time"
+
+	"github.com/lib/pq"
+	"github.com/modfin/pqdocket/want"
 )
 
 func (d *docket) reinitTablesIfError(l *slog.Logger, err error) {
@@ -32,10 +34,15 @@ func (d *docket) startScheduler() {
 	defer pollTicker.Stop()
 	d.logger.Load().With("poll_interval", pollInterval, "parallelism", d.parallelism).Info("scheduler started")
 
-	wantNum := d.parallelism
+	wantNum, err := want.NewCounter(d.parallelism, d.parallelismMinByFunc)
+	if err != nil {
+		d.logger.Load().With("error", err).Error("failed to create want counter")
+		return
+	}
+
 	for {
 		l := d.logger.Load()
-		if wantNum > 0 {
+		if wantNum.Total() > 0 {
 			tasks, err := d.claimTasks(wantNum)
 			if err != nil {
 				l.With("error", err).Error("error in claimTasks")
@@ -43,17 +50,17 @@ func (d *docket) startScheduler() {
 				time.Sleep(20 * time.Second)
 				continue
 			}
-			l.With("want", wantNum, "got", len(tasks)).Info("claimTasks")
+			l.With("want", wantNum.Total(), "got", len(tasks)).Info("claimTasks")
 			for _, t := range tasks {
 				d.claimedTasks <- t
-				wantNum--
+				wantNum.Decrement(t.function)
 			}
 		}
 
 		timeout := d.timeToSleep()
 
 		// protect against polling if our workers are full
-		if wantNum == 0 && timeout < 2*time.Second {
+		if wantNum.Total() == 0 && timeout < 2*time.Second {
 			timeout = 2 * time.Second
 		}
 		if timeout < time.Duration(math.MaxInt64) {
@@ -64,8 +71,8 @@ func (d *docket) startScheduler() {
 		select {
 		case <-taskScheduled:
 			l = l.With("reason", "task_scheduled")
-		case <-d.taskCompleted:
-			wantNum++
+		case funcName := <-d.taskCompleted:
+			wantNum.Increment(funcName)
 			l = l.With("reason", "task_completed")
 		case <-d.close:
 			l = l.With("reason", "closed")
@@ -87,8 +94,8 @@ func (d *docket) startScheduler() {
 		// consume extra buffered taskScheduled/taskCompleted messages
 		for {
 			select {
-			case <-d.taskCompleted:
-				wantNum++
+			case funcName := <-d.taskCompleted:
+				wantNum.Increment(funcName)
 				continue
 			case <-taskScheduled:
 				continue

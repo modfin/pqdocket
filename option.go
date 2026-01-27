@@ -24,6 +24,13 @@ func Parallelism(parallelism int) Option {
 	}
 }
 
+// WithFuncMinParallelism sets the minimum number of parallel tasks for a given function.
+func WithFuncMinParallelism(funcName string, minParallelism int) Option {
+	return func(docket *docket) {
+		docket.parallelismMinByFunc[funcName] = minParallelism
+	}
+}
+
 // DefaultClaimTime sets the default claim time for created tasks. Can be overridden on Task creation.
 func DefaultClaimTime(defaultClaimTimeSeconds int) Option {
 	return func(docket *docket) {

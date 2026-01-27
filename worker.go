@@ -11,7 +11,7 @@ func (d *docket) worker(workerId int) {
 		l.With("worker_id", workerId).Info("running task")
 		err := d.workerBody(t)
 		d.saveTaskResult(l, t, err)
-		d.taskCompleted <- true
+		d.taskCompleted <- t.function
 	}
 	d.logger.Load().With("worker_id", workerId).Info("worker terminated")
 	d.mu.Lock()

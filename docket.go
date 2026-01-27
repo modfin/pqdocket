@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/lib/pq"
 	"io"
 	"log/slog"
 	"math"
@@ -15,6 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/lib/pq"
+	"github.com/modfin/pqdocket/want"
 )
 
 type Docket interface {
@@ -71,6 +73,7 @@ type docket struct {
 	defaultClaimTime        int
 	pollInterval            time.Duration
 	parallelism             int
+	parallelismMinByFunc    map[string]int
 	maxRetryBackoff         int
 	minRetryBackoff         int
 	maxClaimCount           int
@@ -79,7 +82,7 @@ type docket struct {
 	useManuallyCreatedTable string
 
 	claimedTasks  chan task
-	taskCompleted chan bool
+	taskCompleted chan string
 	functions     map[string]TaskFunction
 
 	closed               bool
@@ -117,6 +120,7 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	d.maxRetryBackoff = 128
 	d.minRetryBackoff = 4
 	d.maxClaimCount = math.MaxInt32
+	d.parallelismMinByFunc = make(map[string]int)
 	for _, opt := range options {
 		opt(d)
 	}
@@ -126,7 +130,10 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	if d.useManuallyCreatedTable != "" && d.afterTableInitCallback != nil {
 		return nil, errors.New("AfterTableInit will never be called when UseManuallyCreatedTable is enabled")
 	}
-
+	_, err := want.NewCounter(d.parallelism, d.parallelismMinByFunc)
+	if err != nil {
+		return nil, err
+	}
 	d.close = make(chan bool)
 	d.closeFinished = make(chan bool)
 
@@ -139,7 +146,7 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	d.db = db
 
 	d.claimedTasks = make(chan task, d.parallelism)
-	d.taskCompleted = make(chan bool, d.parallelism*2)
+	d.taskCompleted = make(chan string, d.parallelism*2)
 	d.functions = make(map[string]TaskFunction)
 	if err = d.initTables(); err != nil {
 		return nil, err
