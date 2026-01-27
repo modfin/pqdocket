@@ -165,7 +165,10 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	d.claimedTasks = make(chan task, d.parallelism)
 	d.taskCompleted = make(chan bool, d.parallelism*2)
 	d.functions = make(map[string]TaskFunction)
-	d.functionParallelism = make(map[string]int)
+
+	if d.functionParallelism == nil {
+		d.functionParallelism = make(map[string]int)
+	}
 	d.functionSchedulers = make(map[string]*functionScheduler)
 	if err = d.initTables(); err != nil {
 		return nil, err

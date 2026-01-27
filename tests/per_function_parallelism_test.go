@@ -23,7 +23,7 @@ func PerFunctionParallelismInit() {
 	var err error
 	pfpD, err = pqdocket.Init("postgres://postgres:qwerty@localhost:9300/postgres?sslmode=disable",
 		pqdocket.Namespace("pfp_test"),
-		pqdocket.Parallelism(10),                      // General pool: 10
+		pqdocket.Parallelism(10000),                   // General pool: 10
 		pqdocket.FunctionParallelism("SlowFunc", 3),   // Dedicated: 3
 		pqdocket.FunctionParallelism("MediumFunc", 5), // Dedicated: 5
 		pqdocket.FunctionParallelism("FastFunc", 2),   // Dedicated: 2
@@ -95,7 +95,7 @@ func TestMultipleFunctionSchedulers(t *testing.T) {
 	var tcs []pqdocket.TaskCreator
 
 	// Insert tasks for SlowFunc (parallelism: 3)
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 150; i++ {
 		pfpWg.Add(1)
 		tc := pfpD.CreateTaskWithFuncName("SlowFunc").
 			ScheduleAt(time.Now())
@@ -103,7 +103,7 @@ func TestMultipleFunctionSchedulers(t *testing.T) {
 	}
 
 	// Insert tasks for MediumFunc (parallelism: 5)
-	for i := 0; i < 25; i++ {
+	for i := 0; i < 250; i++ {
 		pfpWg.Add(1)
 		tc := pfpD.CreateTaskWithFuncName("MediumFunc").
 			ScheduleAt(time.Now())
@@ -111,9 +111,17 @@ func TestMultipleFunctionSchedulers(t *testing.T) {
 	}
 
 	// Insert tasks for FastFunc (parallelism: 2)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 100; i++ {
 		pfpWg.Add(1)
 		tc := pfpD.CreateTaskWithFuncName("FastFunc").
+			ScheduleAt(time.Now())
+		tcs = append(tcs, tc)
+	}
+
+	// Insert tasks for General
+	for i := 0; i < 100; i++ {
+		pfpWg.Add(1)
+		tc := pfpD.CreateTaskWithFuncName("GeneralFunc").
 			ScheduleAt(time.Now())
 		tcs = append(tcs, tc)
 	}
