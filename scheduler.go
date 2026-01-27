@@ -209,6 +209,7 @@ func (d *docket) startFunctionScheduler(fs *functionScheduler) {
 		}
 	}
 
+	close(fs.claimedTasks)
 	d.logger.Load().With("function", fs.funcName).Info("close: function scheduler terminated")
 	close(fs.closeFinished)
 }
