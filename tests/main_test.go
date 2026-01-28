@@ -4,12 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/modfin/pqdocket"
 	"log/slog"
 	"math/rand"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/modfin/pqdocket"
 )
 
 var d pqdocket.Docket
@@ -67,6 +68,7 @@ func TestMain(m *testing.M) {
 	FindInit()
 	ChainInit()
 	ExtendedClaimInit()
+	PerFunctionParallelismInit()
 
 	db, err = sql.Open("postgres", dbUrl)
 	if err != nil {
