@@ -46,6 +46,18 @@ func (c *Counter) Total() int {
 	return c.wantNumGeneral + c.WantByGroupsTotal()
 }
 
+func (c *Counter) HasZero() bool {
+	if c.wantNumGeneral == 0 {
+		return true
+	}
+	for _, v := range c.wantNumByGroup {
+		if v.Count == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Counter) WantByGroupsTotal() int {
 	num := 0
 	for _, v := range c.wantNumByGroup {

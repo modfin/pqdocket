@@ -59,8 +59,8 @@ func (d *docket) startScheduler() {
 
 		timeout := d.timeToSleep()
 
-		// protect against polling if our workers are full
-		if wantNum.Total() == 0 && timeout < 2*time.Second {
+		// protect against polling if any of our worker groups are full
+		if wantNum.HasZero() && timeout < 2*time.Second {
 			timeout = 2 * time.Second
 		}
 		if timeout < time.Duration(math.MaxInt64) {
