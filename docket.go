@@ -73,7 +73,7 @@ type docket struct {
 	defaultClaimTime        int
 	pollInterval            time.Duration
 	parallelism             int
-	parallelismMinByFunc    map[string]int
+	parallelismGroups       []want.ParallelismGroup
 	maxRetryBackoff         int
 	minRetryBackoff         int
 	maxClaimCount           int
@@ -120,7 +120,6 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	d.maxRetryBackoff = 128
 	d.minRetryBackoff = 4
 	d.maxClaimCount = math.MaxInt32
-	d.parallelismMinByFunc = make(map[string]int)
 	for _, opt := range options {
 		opt(d)
 	}
@@ -130,7 +129,7 @@ func Init(dbUrl string, options ...Option) (Docket, error) {
 	if d.useManuallyCreatedTable != "" && d.afterTableInitCallback != nil {
 		return nil, errors.New("AfterTableInit will never be called when UseManuallyCreatedTable is enabled")
 	}
-	_, err := want.NewCounter(d.parallelism, d.parallelismMinByFunc)
+	_, err := want.NewCounter(d.parallelism, d.parallelismGroups)
 	if err != nil {
 		return nil, err
 	}

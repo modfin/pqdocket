@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"log/slog"
 	"time"
+
+	"github.com/modfin/pqdocket/want"
 )
 
 type Option func(docket *docket)
@@ -24,10 +26,18 @@ func Parallelism(parallelism int) Option {
 	}
 }
 
-// WithFuncMinParallelism sets the minimum number of parallel tasks for a given function.
-func WithFuncMinParallelism(funcName string, minParallelism int) Option {
+// WithDedicatedParallelismGroup dedicates N parallelism slots to a group of functions.
+// This means that N slots will be dedicated to tasks of these functions only.
+// And that no more than N tasks from this group will run in parallel.
+//
+// For example, if you specify total parallelism to 5 and make a dedicated group of size 4,
+// then all other tasks will have to fight for the the remaining single slot.
+func WithDedicatedParallelismGroup(size int, funcNames ...string) Option {
 	return func(docket *docket) {
-		docket.parallelismMinByFunc[funcName] = minParallelism
+		if len(funcNames) == 0 {
+			return
+		}
+		docket.parallelismGroups = append(docket.parallelismGroups, want.ParallelismGroup{Functions: funcNames, Count: size})
 	}
 }
 

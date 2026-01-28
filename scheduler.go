@@ -34,7 +34,7 @@ func (d *docket) startScheduler() {
 	defer pollTicker.Stop()
 	d.logger.Load().With("poll_interval", pollInterval, "parallelism", d.parallelism).Info("scheduler started")
 
-	wantNum, err := want.NewCounter(d.parallelism, d.parallelismMinByFunc)
+	wantNum, err := want.NewCounter(d.parallelism, d.parallelismGroups)
 	if err != nil {
 		d.logger.Load().With("error", err).Error("failed to create want counter")
 		return

@@ -26,14 +26,14 @@ const (
 	generalParallelism = 50
 )
 
-func PerFunctionParallelismInit() {
+func ParallelismGroupsInit() {
 	var err error
 	pfpD, err = pqdocket.Init("postgres://postgres:qwerty@localhost:9300/postgres?sslmode=disable",
 		pqdocket.Namespace("pfp_test"),
 		pqdocket.Parallelism(generalParallelism),
-		pqdocket.WithFuncMinParallelism("slowFunc", slowParallelism),
-		pqdocket.WithFuncMinParallelism("mediumFunc", mediumParallelism),
-		pqdocket.WithFuncMinParallelism("fastFunc", fastParallelism),
+		pqdocket.WithDedicatedParallelismGroup(slowParallelism, "slowFunc"),
+		pqdocket.WithDedicatedParallelismGroup(mediumParallelism, "mediumFunc"),
+		pqdocket.WithDedicatedParallelismGroup(fastParallelism, "fastFunc"),
 	)
 	if err != nil {
 		panic(err)
@@ -105,8 +105,8 @@ func generalFunc(t *testing.T) func(task pqdocket.RunningTask) error {
 	}
 }
 
-// TestMultipleFunctionSchedulers verifies each function respects its individual limit
-func TestMultipleFunctionSchedulers(t *testing.T) {
+// TestParallelismGroups verifies each function respects its individual limit
+func TestParallelismGroups(t *testing.T) {
 	var tcs []pqdocket.TaskCreator
 
 	pfpD.RegisterFunctionWithFuncName("slowFunc", slowFunc(t))

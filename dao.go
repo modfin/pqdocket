@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,17 +57,6 @@ func (d *docket) initTables() error {
 	if err != nil {
 		return err
 	}
-	if len(d.parallelismMinByFunc) > 0 {
-		q4 := `
-		CREATE INDEX CONCURRENTLY IF NOT EXISTS pqdocket_task_func_scheduled_at_idx
-		ON pqdocket_task (func, scheduled_at ASC) WHERE completed_at IS NULL
-		`
-		_, err = d.db.Exec(strings.Replace(q4, taskTableName, d.tableName(), 2))
-		if err != nil {
-			return err
-		}
-	}
-
 	if d.afterTableInitCallback == nil {
 		return nil
 	}
@@ -203,23 +194,23 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 
 	var claimedTasks []task
 
-	wantByFunc := wantNum.WantByFuncNameTotal()
+	wantByGroups := wantNum.WantByGroupsTotal()
 
-	if wantByFunc > 0 {
+	if wantByGroups > 0 {
 		q := `
 		WITH tasks_to_claim AS (
 			SELECT task_id
-			FROM unnest($2 :: TEXT[], $3 :: INT[]) f(func_name, func_limit)
+			FROM unnest($2 :: TEXT[], $3 :: INT[]) f(func_names, group_limit)
 			JOIN LATERAL (
 				SELECT task_id
 				FROM pqdocket_task
 				WHERE completed_at IS NULL
-				  AND func = f.func_name
+				  AND func = ANY(string_to_array(f.func_names, ','))
 				  AND (scheduled_at < now())
 				  AND (claimed_until IS NULL OR now() > claimed_until)
 				  AND claim_count < $1
 				ORDER BY scheduled_at ASC
-				LIMIT f.func_limit
+				LIMIT f.group_limit
 			) a ON true
 			FOR UPDATE SKIP LOCKED
 		)
@@ -229,7 +220,7 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 		WHERE task_id IN (select * from tasks_to_claim)
 		RETURNING *
 		`
-		funcNames, funcLimits := wantNum.WantByFuncName()
+		funcNames, funcLimits := wantNum.WantByGroup()
 		tasks, err := claim(q, d.maxClaimCount, pq.StringArray(funcNames), pq.Int64Array(funcLimits))
 		if err != nil {
 			return nil, err
@@ -237,9 +228,22 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 		claimedTasks = append(claimedTasks, tasks...)
 	}
 
-	wantGeneral := wantNum.General() + wantByFunc - len(claimedTasks)
+	wantGeneral := wantNum.General()
 
 	if wantGeneral > 0 {
+		d.mu.RLock()
+		registeredFuncs := slices.Collect(maps.Keys(d.functions))
+		d.mu.RUnlock()
+		handledByGroups := wantNum.FunctionsHandledByGroups()
+
+		var generalFuncs []string
+		for _, rf := range registeredFuncs {
+			if _, ok := handledByGroups[rf]; ok {
+				continue
+			}
+			generalFuncs = append(generalFuncs, rf)
+		}
+
 		q := `
 		WITH tasks_to_claim AS (
 			SELECT task_id
@@ -248,8 +252,9 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 			  AND (scheduled_at < now())
 			  AND (claimed_until IS NULL OR now() > claimed_until)
 			  AND claim_count < $1
+			  AND func = ANY($2)
 			ORDER BY scheduled_at ASC
-			LIMIT $2
+			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE pqdocket_task
@@ -258,7 +263,7 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 		WHERE task_id IN (select * from tasks_to_claim)
 		RETURNING *
 		`
-		tasks, err := claim(q, d.maxClaimCount, wantGeneral)
+		tasks, err := claim(q, d.maxClaimCount, pq.StringArray(generalFuncs), wantGeneral)
 		if err != nil {
 			return nil, err
 		}
