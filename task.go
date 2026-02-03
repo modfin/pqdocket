@@ -4,10 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/guregu/null/v6"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/guregu/null/v6"
 )
 
 type Task interface {
@@ -16,6 +17,7 @@ type Task interface {
 	BindMetadata(dest interface{}) error
 	CompletedAt() null.Time
 	ClaimCount() int
+	LastError() null.String
 	CreatedAt() time.Time
 	Func() string
 
@@ -186,6 +188,10 @@ func (t task) Docket() Docket {
 
 func (t task) ClaimCount() int {
 	return t.claimCount
+}
+
+func (t task) LastError() null.String {
+	return t.lastError
 }
 
 func (t task) CreatedAt() time.Time {
