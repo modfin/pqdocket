@@ -1,6 +1,7 @@
 package pqdocket
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -167,37 +168,36 @@ func (d *docket) insertTasks(tx *sql.Tx, skipDuplicates bool, tcs ...TaskCreator
 }
 
 func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
+	d.mu.RLock()
+	registeredFuncs := slices.Collect(maps.Keys(d.functions))
+	d.mu.RUnlock()
 
-	claim := func(q string, args ...any) ([]task, error) {
-		q = strings.Replace(q, taskTableName, d.tableName(), 2)
-		rows, err := d.db.Query(q, args...)
-		if err != nil {
-			return nil, err
+	wantGeneral := wantNum.General()
+	handledByGroups := wantNum.FunctionsHandledByGroups()
+
+	var generalFuncs []string
+	for _, rf := range registeredFuncs {
+		if _, ok := handledByGroups[rf]; ok {
+			continue
 		}
-		defer rows.Close()
-		var claimedTasks []task
-		for rows.Next() {
-			t, err := scanTaskFrom(rows)
-			if err != nil {
-				return nil, err
-			}
-			t.docket = d
-			t.claimedByThisProcess = true
-			claimedTasks = append(claimedTasks, t)
-		}
-		err = rows.Err()
-		if err != nil {
-			return nil, err
-		}
-		return claimedTasks, rows.Close()
+		generalFuncs = append(generalFuncs, rf)
 	}
 
-	var claimedTasks []task
+	funcNames, funcLimits := wantNum.WantByGroup()
+	funcNames = append(funcNames, strings.Join(generalFuncs, ","))
+	funcLimits = append(funcLimits, int64(wantGeneral))
 
-	wantByGroups := wantNum.WantByGroupsTotal()
-
-	if wantByGroups > 0 {
-		q := `
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tx, err := d.db.BeginTx(ctx, nil) // tx rollbacks are handled by context cancel
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`SET LOCAL enable_seqscan = off`)
+	if err != nil {
+		return nil, err
+	}
+	q := `
 		WITH tasks_to_claim AS (
 			SELECT task_id
 			FROM unnest($2 :: TEXT[], $3 :: INT[]) f(func_names, group_limit)
@@ -220,56 +220,29 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 		WHERE task_id IN (select * from tasks_to_claim)
 		RETURNING *
 		`
-		funcNames, funcLimits := wantNum.WantByGroup()
-		tasks, err := claim(q, d.maxClaimCount, pq.StringArray(funcNames), pq.Int64Array(funcLimits))
+	q = strings.Replace(q, taskTableName, d.tableName(), 2)
+	rows, err := tx.Query(q, d.maxClaimCount, pq.StringArray(funcNames), pq.Int64Array(funcLimits))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var claimedTasks []task
+	for rows.Next() {
+		t, err := scanTaskFrom(rows)
 		if err != nil {
 			return nil, err
 		}
-		claimedTasks = append(claimedTasks, tasks...)
+		t.docket = d
+		t.claimedByThisProcess = true
+		claimedTasks = append(claimedTasks, t)
 	}
-
-	wantGeneral := wantNum.General()
-
-	if wantGeneral > 0 {
-		d.mu.RLock()
-		registeredFuncs := slices.Collect(maps.Keys(d.functions))
-		d.mu.RUnlock()
-		handledByGroups := wantNum.FunctionsHandledByGroups()
-
-		var generalFuncs []string
-		for _, rf := range registeredFuncs {
-			if _, ok := handledByGroups[rf]; ok {
-				continue
-			}
-			generalFuncs = append(generalFuncs, rf)
-		}
-
-		q := `
-		WITH tasks_to_claim AS (
-			SELECT task_id
-			FROM pqdocket_task t1
-			WHERE completed_at IS NULL
-			  AND (scheduled_at < now())
-			  AND (claimed_until IS NULL OR now() > claimed_until)
-			  AND claim_count < $1
-			  AND func = ANY($2)
-			ORDER BY scheduled_at ASC
-			LIMIT $3
-			FOR UPDATE SKIP LOCKED
-		)
-		UPDATE pqdocket_task
-		SET claimed_until = now() + make_interval(secs := claim_time_seconds),
-			claim_count = claim_count + 1
-		WHERE task_id IN (select * from tasks_to_claim)
-		RETURNING *
-		`
-		tasks, err := claim(q, d.maxClaimCount, pq.StringArray(generalFuncs), wantGeneral)
-		if err != nil {
-			return nil, err
-		}
-		claimedTasks = append(claimedTasks, tasks...)
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	return claimedTasks, nil
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	return claimedTasks, tx.Commit()
 }
 
 func (d *docket) saveTaskResult(l *slog.Logger, t task, taskErr error) {
