@@ -193,7 +193,15 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(`SET LOCAL enable_seqscan = off`)
+	_, err = tx.Exec(`SET LOCAL enable_hashjoin = off;`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`SET LOCAL enable_mergejoin = off;`)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`SET LOCAL jit = off;`)
 	if err != nil {
 		return nil, err
 	}
