@@ -210,14 +210,23 @@ func (d *docket) claimTasks(wantNum *want.Counter) ([]task, error) {
 			SELECT task_id
 			FROM unnest($2 :: TEXT[], $3 :: INT[]) f(func_names, group_limit)
 			JOIN LATERAL (
-				SELECT task_id
-				FROM pqdocket_task
-				WHERE completed_at IS NULL
-				  AND func = ANY(string_to_array(f.func_names, ','))
-				  AND (scheduled_at < now())
-				  AND (claimed_until IS NULL OR now() > claimed_until)
-				  AND claim_count < $1
-				ORDER BY scheduled_at ASC
+				SELECT combined_tasks.task_id
+				FROM (
+						 SELECT single_func
+						 FROM unnest(string_to_array(f.func_names, ',')) AS single_func
+					 ) f2
+						 CROSS JOIN LATERAL (
+					SELECT task_id, scheduled_at
+					FROM pqdocket_task
+					WHERE completed_at IS NULL
+					  AND claim_count < $1
+					  AND func = f2.single_func
+					  AND scheduled_at < now()
+					  AND (claimed_until IS NULL OR now() > claimed_until)
+					ORDER BY scheduled_at ASC
+					LIMIT f.group_limit
+					) combined_tasks
+				ORDER BY combined_tasks.scheduled_at ASC
 				LIMIT f.group_limit
 			) a ON true
 			FOR UPDATE SKIP LOCKED
