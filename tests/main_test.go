@@ -4,12 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/modfin/pqdocket"
 	"log/slog"
 	"math/rand"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/modfin/pqdocket"
 )
 
 var d pqdocket.Docket
@@ -31,6 +32,7 @@ func TestMain(m *testing.M) {
 		pqdocket.DefaultClaimTime(20),
 		pqdocket.WithLogger(l.With("instance", "d1")),
 		pqdocket.EnableTaskCleaner(pqdocket.TaskCleanerSettings{PollInterval: time.Second}),
+		pqdocket.WithDedicatedParallelismGroup(30, "Task1", "Task3", "StressTask"),
 	)
 	if err != nil {
 		fmt.Println("d1 init err", err)
@@ -67,6 +69,7 @@ func TestMain(m *testing.M) {
 	FindInit()
 	ChainInit()
 	ExtendedClaimInit()
+	ParallelismGroupsInit()
 
 	db, err = sql.Open("postgres", dbUrl)
 	if err != nil {
